@@ -1,8 +1,11 @@
 # APRS Beacon
 
-A command-line script for making [pi-star](https://www.pistar.uk) hotspots visible on the [aprs.fi](http://aprs.fi) map
+A command-line script for making [pi-star](https://www.pistar.uk) hotspots visible on the [aprs.fi](http://aprs.fi) map.
 
 While MMDVMHost can be configured to forward APRS positional messages with no issue; when configured strictly for the DMR network the hotspot has no beacon capability.
+
+<img width="400" alt="aprs fi screenshot" src="https://github.com/user-attachments/assets/4347f113-5dd6-4ab3-ba69-9d2b062ab845">
+
 
 ## Installation <a id="installation"></a>
 
@@ -24,6 +27,8 @@ sudo chown mmdvm:mmdvm /home/mmdvm/aprs_beacon
 
 # edit SSID suffix, APRS symbol and description
 sudo nano /etc/aprs_beacon
+
+# make pistar filesystem read-only again
 rpi-ro
 ```
 
