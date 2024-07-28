@@ -1,0 +1,67 @@
+#!/bin/bash
+
+function readConfig ()
+{
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  sed -nr "/^\[$section\]/ { :l /^$key[ ]*=/ { s/[^=]*=[ ]*//; p; q;}; n; b l;}" $file
+}
+
+CONFIG_APRS=/etc/aprsgateway
+CONFIG_MMDVM=/etc/mmdvmhost
+CONFIG_BEACON=/etc/aprs_beacon
+
+host=$(readConfig $CONFIG_APRS APRS-IS Server)
+port=$(readConfig $CONFIG_APRS APRS-IS Port)
+username=$(readConfig $CONFIG_APRS General Callsign)
+password=$(readConfig $CONFIG_APRS APRS-IS Password)
+lat=$(readConfig $CONFIG_MMDVM Info Latitude)
+long=$(readConfig $CONFIG_MMDVM Info Longitude)
+
+suffix=$(readConfig $CONFIG_BEACON General Suffix)
+symbol=$(readConfig $CONFIG_BEACON General Symbol)
+description=$(readConfig $CONFIG_BEACON General Description)
+
+# location packet
+lat=$(echo ${lat%%\.*} "0.${lat#*\.}" N S | awk '{ printf("%02d%02d.%02d%s", $1 < 0 ? -$1 : $1, int($2*60), $2 * 3600 % 60, $1 < 0 ? $4 : $3) }')
+
+long=$(echo ${long%%\.*} "0.${long#*\.}" E W | awk '{ printf("%03d%02d.%02d%s", $1 < 0 ? -$1 : $1, int($2*60), $2 * 3600 % 60, $1 < 0 ? $4 : $3) }')
+
+packet=\!"${lat}/${long}${symbol}$description"
+
+# telnet to aprsis server, login, send concatenated string, quit
+pipe="/tmp/aprs_beacon_pipe"
+trap "rm -f $pipe" EXIT
+mkfifo "$pipe"
+exec 4<> $pipe
+
+exec 3<>/dev/tcp/${host}/${port}
+
+echo Sending: $packet
+{
+  sleep 1
+  echo "user $username pass $password vers aprs-beacon 0.01"
+  sleep 1
+  printf  "$username-$suffix>APRS,TCPIP*:$packet\n"
+  echo 1 > "$pipe"
+  sleep 1
+  wait
+} >&3 &
+watchdog=$!
+
+while read -t 10 response; do
+  echo $response
+
+  read -t 0.1 -u 4 -r status
+  echo "status: $status"
+
+  # wait for first status message
+  # if [[ "${status}" -eq 1 && "$response" =~ ^#\ aprsc ]]; then
+  if [[ "${status}" -eq 1 ]]; then
+    break
+  fi
+done <&3
+
+ps -p $watchdog >/dev/null && kill $watchdog || echo No process $watchdog to kill
