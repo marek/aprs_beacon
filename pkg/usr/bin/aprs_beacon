@@ -1,0 +1,238 @@
+#!/bin/bash
+#
+# aprs_beacon - send a position beacon for a Pi-Star hotspot to APRS-IS.
+#
+# Reads the callsign, APRS-IS server and passcode from APRSGateway's config,
+# the position from MMDVMHost's config, and the SSID, symbol and comment from
+# /etc/aprs_beacon. Every run is logged to syslog with the tag "aprs_beacon".
+#
+# Usage: aprs_beacon [-n|--dry-run]
+
+set -u
+
+VERSION=0.2.0
+
+CONFIG_APRS=${CONFIG_APRS:-/etc/aprsgateway}
+CONFIG_MMDVM=${CONFIG_MMDVM:-/etc/mmdvmhost}
+CONFIG_BEACON=${CONFIG_BEACON:-/etc/aprs_beacon}
+DEVICE_MODEL=${DEVICE_MODEL:-/sys/firmware/devicetree/base/model}
+# Pi-Star marks the controller software with /etc/dstar-radio.mmdvmhost or
+# /etc/dstar-radio.dstarrepeater; the marker's [Modem] Hardware is the modem
+DSTAR_RADIO=${DSTAR_RADIO:-/etc/dstar-radio}
+# the dashboard page whose Radio/Modem Type list names each modem key
+DASHBOARD_CONFIG=${DASHBOARD_CONFIG:-/var/www/dashboard/admin/configure.php}
+
+FALLBACK_SERVER=rotate.aprs2.net:14580
+READ_TIMEOUT=10       # seconds to wait for each line from the server
+ATTEMPT_TIMEOUT=30    # seconds for one whole connect/login/send attempt
+# The APRS spec allows 43 comment characters for RF; APRS-IS and aprs.fi
+# carry longer ones, and this beacon never goes over RF
+MAX_COMMENT=128
+
+log()
+{
+  echo "$*"
+  logger -t aprs_beacon -- "$*" 2>/dev/null
+}
+
+die()
+{
+  log "error: $*"
+  exit 1
+}
+
+# readConfig FILE SECTION KEY - print KEY's value from [SECTION] of an INI file
+readConfig()
+{
+  awk -v section="[$2]" -v key="$3" '
+    { sub(/\r$/, "") }
+    /^\[/ { found = ($0 == section); next }
+    found && $0 ~ "^" key "[ \t]*=" {
+      sub(/^[^=]*=[ \t]*/, ""); sub(/[ \t]+$/, ""); print; exit
+    }' "$1" 2>/dev/null
+}
+
+# aprsCoord DECIMAL DEGREE_DIGITS POSITIVE NEGATIVE - format as APRS DDMM.mmH
+aprsCoord()
+{
+  awk -v v="$1" -v digits="$2" -v pos="$3" -v neg="$4" 'BEGIN {
+    hemi = (v < 0) ? neg : pos
+    if (v < 0) v = -v
+    deg = int(v)
+    min = sprintf("%05.2f", (v - deg) * 60)
+    if (min == "60.00") { deg++; min = "00.00" }
+    printf("%0" digits "d%s%s", deg, min, hemi)
+  }'
+}
+
+# modemName KEY - the Radio/Modem Type label the Pi-Star dashboard shows for a
+# modem key, without interface notes: "STM32-DVM / MMDVM_HS - Raspberry Pi Hat
+# (GPIO)" -> "STM32-DVM / MMDVM_HS - Raspberry Pi Hat". Prints KEY itself when
+# the dashboard isn't installed or doesn't list it.
+modemName()
+{
+  local label=
+  if [[ $1 =~ ^[a-z0-9_]+$ ]]; then
+    label=$(sed -n "s/.*value=\"$1\">\([^<]*\)<.*/\1/p" "$DASHBOARD_CONFIG" 2>/dev/null | head -1)
+  fi
+  label=$(sed -E 's/&amp;/\&/g; s/ \([^)]*\)//g; s/ for (Nano ?Pi( AIR)?|Pi|USB)//' <<< "$label")
+  echo "${label:-$1}"
+}
+
+# aprsPasscode CALLSIGN - the standard APRS-IS passcode for a callsign
+aprsPasscode()
+{
+  local call=${1%%-*} hash=$((0x73e2)) i
+  call=${call^^}
+  for ((i = 0; i < ${#call}; i += 2)); do
+    hash=$(( hash ^ ($(printf '%d' "'${call:i:1}") << 8) ))
+    if (( i + 1 < ${#call} )); then
+      hash=$(( hash ^ $(printf '%d' "'${call:i+1:1}") ))
+    fi
+  done
+  echo $(( hash & 0x7fff ))
+}
+
+# session HOST PORT - one connect, login, send; uses LOGIN, PASSCODE, PACKET
+session()
+{
+  local host=$1 port=$2 line
+  local -a resp
+
+  if ! exec 3<>"/dev/tcp/$host/$port"; then
+    log "cannot connect to $host:$port"
+    return 1
+  fi
+
+  if ! read -r -t "$READ_TIMEOUT" -u 3 line; then
+    log "no banner from $host:$port"
+    return 1
+  fi
+
+  printf 'user %s pass %s vers aprs_beacon %s\r\n' "$LOGIN" "$PASSCODE" "$VERSION" >&3
+
+  while read -r -t "$READ_TIMEOUT" -u 3 line; do
+    line=${line%$'\r'}
+    [[ $line == "# logresp "* ]] && break
+  done
+  if [[ $line != "# logresp "* ]]; then
+    log "no login response from $host:$port"
+    return 1
+  fi
+
+  # "# logresp CALL verified, server NAME" or "# logresp CALL unverified, ..."
+  read -r -a resp <<< "${line//,/ }"
+  if [[ ${resp[3]:-} != verified ]]; then
+    log "login as $LOGIN not verified by $host:$port, check the APRS-IS passcode ($line)"
+    return 2
+  fi
+
+  if ! printf '%s\r\n' "$PACKET" >&3; then
+    log "lost connection to $host:$port while sending"
+    return 1
+  fi
+  sleep 1
+  exec 3>&-
+
+  log "sent $PACKET via ${resp[5]:-$host}"
+}
+
+if [[ ${1:-} == --session ]]; then
+  session "$2" "$3"
+  exit
+fi
+
+dryrun=0
+case ${1:-} in
+  -n|--dry-run) dryrun=1 ;;
+  "") ;;
+  *) echo "usage: aprs_beacon [-n|--dry-run]" >&2; exit 2 ;;
+esac
+
+# configuration
+server=$(readConfig "$CONFIG_APRS" APRS-IS Server)
+port=$(readConfig "$CONFIG_APRS" APRS-IS Port)
+callsign=$(readConfig "$CONFIG_APRS" General Callsign)
+[[ -n $callsign ]] || callsign=$(readConfig "$CONFIG_MMDVM" General Callsign)
+passcode=$(readConfig "$CONFIG_APRS" APRS-IS Password)
+
+lat=$(readConfig "$CONFIG_BEACON" General Latitude)
+[[ -n $lat ]] || lat=$(readConfig "$CONFIG_MMDVM" Info Latitude)
+long=$(readConfig "$CONFIG_BEACON" General Longitude)
+[[ -n $long ]] || long=$(readConfig "$CONFIG_MMDVM" Info Longitude)
+
+suffix=$(readConfig "$CONFIG_BEACON" General Suffix)
+table=$(readConfig "$CONFIG_BEACON" General Table)
+symbol=$(readConfig "$CONFIG_BEACON" General Symbol)
+description=$(readConfig "$CONFIG_BEACON" General Description)
+
+callsign=${callsign^^}
+[[ $callsign =~ ^[A-Z0-9]{3,7}$ ]] || die "no valid callsign in $CONFIG_APRS or $CONFIG_MMDVM (got '$callsign')"
+[[ $lat =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && awk -v v="$lat" 'BEGIN { exit !(v >= -90 && v <= 90) }' \
+  || die "invalid latitude '$lat'"
+[[ $long =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && awk -v v="$long" 'BEGIN { exit !(v >= -180 && v <= 180) }' \
+  || die "invalid longitude '$long'"
+[[ -z $suffix || $suffix =~ ^[A-Z0-9]{1,2}$ ]] || die "invalid Suffix '$suffix' in $CONFIG_BEACON"
+table=${table:-/}
+[[ ${#table} == 1 ]] || die "Table in $CONFIG_BEACON must be one character"
+symbol=${symbol:-r}
+[[ ${#symbol} == 1 ]] || die "Symbol in $CONFIG_BEACON must be one character"
+[[ $passcode =~ ^[0-9]+$ ]] || passcode=$(aprsPasscode "$callsign")
+
+# Description may use {mode} (Simplex or Duplex, from MMDVMHost), {device}
+# (the board model, shortened: "Raspberry Pi Zero 2 W Rev 1.0" -> "RPi Zero 2 W"),
+# {controller} (MMDVMHost or DStarRepeater) and {modem} (the Radio/Modem Type).
+# The model file ends in a NUL byte, which tr drops.
+mode=Simplex
+[[ $(readConfig "$CONFIG_MMDVM" General Duplex) == 1 ]] && mode=Duplex
+device=$(tr -d '\0' 2>/dev/null < "$DEVICE_MODEL")
+device=${device% Rev *}
+device=${device/Raspberry Pi/RPi}
+controller=unknown
+radio=
+if [[ -e $DSTAR_RADIO.dstarrepeater ]]; then
+  controller=DStarRepeater radio=$DSTAR_RADIO.dstarrepeater
+elif [[ -e $DSTAR_RADIO.mmdvmhost ]]; then
+  controller=MMDVMHost radio=$DSTAR_RADIO.mmdvmhost
+fi
+modem=$(readConfig "$radio" Modem Hardware)
+modem=$(modemName "${modem:-unknown}")
+description=${description//"{mode}"/$mode}
+description=${description//"{device}"/${device:-unknown}}
+description=${description//"{controller}"/$controller}
+description=${description//"{modem}"/$modem}
+if (( ${#description} > MAX_COMMENT )); then
+  echo "note: Description is ${#description} characters; sending the first $MAX_COMMENT" >&2
+fi
+
+# The login carries the SSID so it never matches APRSGateway's own login:
+# APRS-IS servers drop the older connection when the same login connects twice.
+source_call=$callsign${suffix:+-$suffix}
+packet="!$(aprsCoord "$lat" 2 N S)$table$(aprsCoord "$long" 3 E W)$symbol${description:0:MAX_COMMENT}"
+
+export LOGIN=$source_call PASSCODE=$passcode PACKET="$source_call>APRS,TCPIP*:$packet"
+
+if (( dryrun )); then
+  echo "would send $PACKET"
+  exit 0
+fi
+
+servers=()
+[[ -n $server ]] && servers+=("$server:${port:-14580}")
+[[ ${servers[0]:-} == "$FALLBACK_SERVER" ]] || servers+=("$FALLBACK_SERVER")
+
+for s in "${servers[@]}"; do
+  if command -v timeout >/dev/null; then
+    timeout "$ATTEMPT_TIMEOUT" "$BASH" "$0" --session "${s%:*}" "${s##*:}"
+  else
+    "$BASH" "$0" --session "${s%:*}" "${s##*:}"
+  fi
+  rc=$?
+  case $rc in
+    0) exit 0 ;;
+    2) exit 1 ;;   # a bad passcode fails on every server
+    124) log "timed out after ${ATTEMPT_TIMEOUT}s talking to $s" ;;
+  esac
+done
+
+die "beacon not sent"

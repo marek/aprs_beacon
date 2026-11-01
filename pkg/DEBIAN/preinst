@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+# Clear out a manual tarball install (0.1.x) so dpkg can own these paths
+# without asking about the old cron file.
+if [ "$1" = install ] && grep -qs /home/mmdvm/aprs_beacon /etc/cron.d/aprs_beacon; then
+  rm -f /etc/cron.d/aprs_beacon /home/mmdvm/aprs_beacon
+fi
+
+exit 0

@@ -1,0 +1,3 @@
+# APRS beacon, every 5 minutes; output goes to syslog (grep aprs_beacon /var/log/syslog)
+# m h day(month) month day(week) user command
+*/5 * * * *     mmdvm  [ -x /usr/bin/aprs_beacon ] && timeout 120 /usr/bin/aprs_beacon >/dev/null 2>&1

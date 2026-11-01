@@ -1,0 +1,15 @@
+[General]
+# SSID appended to the callsign, e.g. 1 gives VE3XXX-1
+Suffix=1
+# APRS symbol table (/ or \) and symbol character
+Table=/
+Symbol=1
+# Comment shown on aprs.fi, at most 128 characters. Placeholders:
+#   {controller}  MMDVMHost or DStarRepeater (Controller Software)
+#   {mode}        Simplex or Duplex (from /etc/mmdvmhost)
+#   {device}      the board, e.g. RPi Zero 2 W
+#   {modem}       the Radio/Modem Type, e.g. STM32-DVM / MMDVM_HS
+Description={controller} {mode} Hotspot, {device}, {modem}
+# Optional: beacon this position instead of the one in /etc/mmdvmhost
+#Latitude=43.85
+#Longitude=-79.02

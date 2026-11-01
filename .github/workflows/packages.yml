@@ -1,0 +1,93 @@
+name: packages
+
+# Runs only when a v* tag is pushed. Builds the Debian package with the same
+# ./build.sh a contributor runs locally, smoke-tests it with
+# tools/smoke-test.sh, installs it, keeps the .deb as an artifact, and drafts
+# a release from it. The tag must match the VERSION file.
+#
+# The job runs in Debian bullseye, the release Pi-Star 4.2 is built on, so the
+# bash, mawk and dpkg it tests with are the hotspot's. The package holds only
+# scripts (Architecture: all), so the runner's CPU doesn't matter.
+#
+# The release carries the package twice: as aprs-beacon_<version>_all.deb and
+# as aprs-beacon_all.deb, the fixed name the README downloads through
+# releases/latest/download/.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Debian package
+    runs-on: ubuntu-24.04
+    container: debian:bullseye
+    steps:
+      - name: build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git
+          git config --system --add safe.directory '*'
+
+      - uses: actions/checkout@v7
+
+      - name: the tag names the project version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match VERSION $version (expected v$version)"
+            exit 1
+          fi
+
+      - name: check scripts
+        run: |
+          bash -n pkg/usr/bin/aprs_beacon build.sh tools/smoke-test.sh
+          sh -n pkg/DEBIAN/preinst
+
+      - name: package
+        run: ./build.sh
+
+      - name: smoke test
+        run: tools/smoke-test.sh dist/aprs-beacon_*_all.deb
+
+      - name: install test
+        run: |
+          apt-get install -y ./dist/aprs-beacon_*_all.deb
+          dpkg -s aprs-beacon | grep -q '^Status: install ok installed'
+          test -x /usr/bin/aprs_beacon
+          test -f /etc/cron.d/aprs_beacon
+
+      - name: fixed-name copy for releases/latest/download
+        run: cp dist/aprs-beacon_*_all.deb dist/aprs-beacon_all.deb
+
+      - name: keep the package
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: [deb]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-deb
+          path: dist
+      - name: draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            dist/* --draft --title "aprs_beacon $TAG"

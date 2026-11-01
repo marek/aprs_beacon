@@ -1,3 +1,0 @@
-# APRS beacon
-# m h day(month) month day(week) user command
-*/5 * * * *     mmdvm  [ -x /home/mmdvm/aprs_beacon ] && /home/mmdvm/aprs_beacon

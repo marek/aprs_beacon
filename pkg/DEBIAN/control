@@ -1,0 +1,12 @@
+Package: aprs-beacon
+Version: 0.2.0
+Architecture: all
+Maintainer: Marek Kudlacz <marek@kudlacz.com>
+Depends: bash (>= 4.2), coreutils, bsdutils, mawk | gawk, cron
+Section: hamradio
+Priority: optional
+Homepage: https://github.com/marek/aprs_beacon
+Description: APRS-IS position beacon for Pi-Star hotspots
+ Periodically sends the hotspot's position to APRS-IS so it shows up on
+ aprs.fi, using the callsign, server and passcode already configured for
+ APRSGateway and the location configured in MMDVMHost.
