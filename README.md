@@ -91,4 +91,4 @@ sudo -u mmdvm aprs_beacon
 
 `tools/smoke-test.sh` dry-runs the beacon against fake Pi-Star config files and checks the exact packets: with no argument it tests `pkg/` in the checkout (any bash 4.2+, macOS included via Homebrew bash), and `tools/smoke-test.sh dist/aprs-beacon_<version>_all.deb` tests the built package.
 
-Pushing a `v*` tag that matches `VERSION` (e.g. `v0.2.0`) builds, smoke-tests and installs the package in Debian bullseye (Pi-Star 4.2's release) and drafts a GitHub release with it; publish the draft to make it the latest download.
+Pushing a `v*` tag that matches `VERSION` (e.g. `v0.2.0`) builds and smoke-tests the package in Debian bullseye (Pi-Star 4.2's release) and drafts a GitHub release with it; publish the draft to make it the latest download.
